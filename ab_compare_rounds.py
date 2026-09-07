@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pipeline as P
 from eval_ckpt import load_model
 
-N = 200
+N = int(sys.argv[1]) if len(sys.argv) > 1 else 200
 ROUNDS = ['BC'] + [f'D{i}' for i in range(1, 13)]
 FILES = {
     'GP-Small 3.7K': lambda r: 'runs/gp_small_kamm533_bc.pt' if r == 'BC' else f'runs/gp_small_kamm533_{r.lower()}.pt',

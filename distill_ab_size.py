@@ -25,7 +25,10 @@ def save_ckpt_student(student, t, path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--from-round', type=int, default=0, help='从该轮继续 (0=从头 BC)')
+    ap.add_argument('--save', default='runs/ab_gpmed', help='产物前缀')
     args = ap.parse_args()
+    global SAVE, PROG
+    SAVE = args.save; PROG = f'{SAVE}_progress.json'
 
     teacher, _ = load_model('runs/kamm533_teacher.pt'); teacher.eval()
     P.set_teacher_deterministic(teacher)
