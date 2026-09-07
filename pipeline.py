@@ -146,6 +146,28 @@ class GPSmall(nn.Module):
         r = self.forward(p8, v2, v3)
         return torch.stack([torch.clamp(r[:, 0], -A_BRAKE, A_LONG), torch.clamp(r[:, 1], -O_MAX, O_MAX)], dim=1)
 
+class GPMedium(nn.Module):
+    """蒸馏学生 (容量 A/B): ~9K 参数. 同构放大 GPSmall — 双 enc 2→10, 主干 40→64→64→32→2.
+
+    ReLU 保持 (MCU 无 GELU). checkpoint 带 arch='gpmed' 供 eval_ckpt 识别.
+    """
+    def __init__(self):
+        super().__init__()
+        self.state_enc = nn.Linear(2, 10); self.target_enc = nn.Linear(2, 10)
+        self.fc1 = nn.Linear(40, 64); self.fc2 = nn.Linear(64, 64); self.fc3 = nn.Linear(64, 32); self.fc4 = nn.Linear(32, 2)
+        for m_ in [self.state_enc, self.target_enc]: nn.init.xavier_uniform_(m_.weight); nn.init.zeros_(m_.bias)
+        for m_ in [self.fc1, self.fc2, self.fc3]: nn.init.kaiming_uniform_(m_.weight, nonlinearity='relu'); nn.init.constant_(m_.bias, 0.01)
+        nn.init.xavier_uniform_(self.fc4.weight); nn.init.zeros_(self.fc4.bias)
+    def forward(self, p8, v2, v3):
+        s = self.state_enc(p8[:, :2]); t1 = self.target_enc(p8[:, 2:4])
+        t2 = v2.unsqueeze(1) * self.target_enc(p8[:, 4:6])
+        t3 = v3.unsqueeze(1) * self.target_enc(p8[:, 6:8])
+        h = F.relu(self.fc1(torch.cat([s, t1, t2, t3], dim=1))); h = F.relu(self.fc2(h)); h = F.relu(self.fc3(h))
+        return self.fc4(h)
+    def deploy(self, p8, v2, v3):
+        r = self.forward(p8, v2, v3)
+        return torch.stack([torch.clamp(r[:, 0], -A_BRAKE, A_LONG), torch.clamp(r[:, 1], -O_MAX, O_MAX)], dim=1)
+
 # ═══════════════════ 观测与 SelWP ═══════════════════
 def polar_obs(sp, g1, g2, g3):
     x, y, th = sp[:, 0], sp[:, 1], sp[:, 2]; v, dlt = sp[:, 3], sp[:, 4]
@@ -203,39 +225,21 @@ def _polar_angles(n, n_side, n_behind, angle_sigma, dev_local):
     th = torch.atan2(torch.sin(th), torch.cos(th))
     return th[torch.randperm(n, device=dev_local)]
 
-LONG_MIN, LONG_FRAC = 3.0, 0.25   # 长腿: [LONG_MIN, max_d] 均匀采样, 占比/腿 (≈58% 场景含 ≥1 长腿)
-CLOSE_MIN, CLOSE_MAX, CLOSE_FRAC = 0.05, 0.65, 0.20   # 超近目标带: 补足 0.5m 以内的欠采样 (反打触发区)
+# v4 距离分布: 纯半正态截断 [0.05, 6.5], 无均匀带.
+#   近端 [0.05,0.5) 由半正态自然平坦覆盖 (~26%) — 无需 close 带 (v3 教训: 洞在截断下限, 不在形状)
+#   远端由 full_state 全速起步 + 轨迹扫距自然覆盖 — 无需 long 带 (v1 证据: 纯半正态教师远端不退化)
 
-def _polar_dists(n, min_d, max_d, dist_sigma, dev_local, long_frac=LONG_FRAC, close_frac=CLOSE_FRAC):
-    """拒绝采样距离, 保证返回恰 n 个 (候选不足时循环补足).
+def _polar_dists(n, min_d, max_d, dist_sigma, dev_local, long_frac=0.0, close_frac=0.0):
+    """半正态截断采样距离, 保证返回恰 n 个 (候选不足时循环补足).
 
-    混合三带:
-      close_frac: 超近目标 [CLOSE_MIN, CLOSE_MAX] 均匀 — 0.5m 以内欠采样补足 (反打触发区)
-      long_frac:  长腿 [LONG_MIN, max_d] 均匀 — 远距离 (全速逼近→提前刹车) 欠采样补足
-      其余: 半正态 [min_d, max_d]
+    long_frac/close_frac 保留为 0 (兼容旧签名); v4 起不使用均匀带.
     """
-    n_long = int(n * long_frac); n_close = int(n * close_frac)
-    n_short = n - n_long - n_close
     d = torch.abs(torch.randn(max(10, int(n*4)), device=dev_local) * dist_sigma)
     d = d[(d >= min_d) & (d <= max_d)]
-    while d.shape[0] < n_short:
+    while d.shape[0] < n:
         extra = torch.abs(torch.randn(max(10, int(n*4)), device=dev_local) * dist_sigma)
         d = torch.cat([d, extra[(extra >= min_d) & (extra <= max_d)]])
-    d = d[:n_short]
-    if n_close > 0:
-        dc = torch.rand(max(10, int(n_close*4)), device=dev_local) * (CLOSE_MAX - CLOSE_MIN) + CLOSE_MIN
-        while dc.shape[0] < n_close:
-            extra = torch.rand(max(10, int(n_close*4)), device=dev_local) * (CLOSE_MAX - CLOSE_MIN) + CLOSE_MIN
-            dc = torch.cat([dc, extra])
-        d = torch.cat([d, dc[:n_close]])
-    if n_long > 0:
-        dl = torch.rand(max(10, int(n_long*4)), device=dev_local) * (max_d - LONG_MIN) + LONG_MIN
-        dl = dl[dl <= max_d]
-        while dl.shape[0] < n_long:
-            extra = torch.rand(max(10, int(n_long*4)), device=dev_local) * (max_d - LONG_MIN) + LONG_MIN
-            dl = torch.cat([dl, extra[extra <= max_d]])
-        d = torch.cat([d, dl[:n_long]])
-    return d[torch.randperm(n, device=dev_local)]
+    return d[:n][torch.randperm(n, device=dev_local)]
 
 def gen_scenes_random(n, dev_local, full_state=False):
     """简单随机航点 — Phase A 基础训练 / Phase C straight-line."""
@@ -253,7 +257,7 @@ def gen_scenes_polar(n, dev_local, full_state=False):
     full_state: 初始状态全幅 (v≤V_MAX, δ≤δmax) — 冷启动 (P1) 之后使用.
     """
     n_side = int(n * 0.4); n_behind = n - 2*n_side
-    min_d, max_d = 0.5, 6.0
+    min_d, max_d = 0.05, 6.5
     v_scale = V_MAX if full_state else V_MAX * 0.5
     d_scale = DELTA_MAX if full_state else DELTA_MAX * 0.3
     v = torch.rand(n, device=dev_local) * v_scale
@@ -288,34 +292,18 @@ def _ga_mixed(n, dev_local):
     th = torch.atan2(torch.sin(th), torch.cos(th))
     return th[torch.randperm(n, device=dev_local)]
 
-def _gd_mixed(n, min_d, max_d, dev_local, long_frac=LONG_FRAC, close_frac=CLOSE_FRAC):
-    """蒸馏场景距离 — 同 _polar_dists: 超近+长腿双带补足欠采样."""
-    n_long = int(n * long_frac); n_close = int(n * close_frac)
-    n_short = n - n_long - n_close
+def _gd_mixed(n, min_d, max_d, dev_local, long_frac=0.0, close_frac=0.0):
+    """蒸馏场景距离 — 半正态 σ=2.0 截断, 与训练分布同源 (v4: 无均匀带)."""
     d = torch.abs(torch.randn(max(10, int(n*4)), device=dev_local)*2.0)
     d = d[(d >= min_d) & (d <= max_d)]
-    while d.shape[0] < n_short:
+    while d.shape[0] < n:
         extra = torch.abs(torch.randn(max(10, int(n*4)), device=dev_local)*2.0)
         d = torch.cat([d, extra[(extra >= min_d) & (extra <= max_d)]])
-    d = d[:n_short]
-    if n_close > 0:
-        dc = torch.rand(max(10, int(n_close*4)), device=dev_local) * (CLOSE_MAX - CLOSE_MIN) + CLOSE_MIN
-        while dc.shape[0] < n_close:
-            extra = torch.rand(max(10, int(n_close*4)), device=dev_local) * (CLOSE_MAX - CLOSE_MIN) + CLOSE_MIN
-            dc = torch.cat([dc, extra])
-        d = torch.cat([d, dc[:n_close]])
-    if n_long > 0:
-        dl = torch.rand(max(10, int(n_long*4)), device=dev_local) * (max_d - LONG_MIN) + LONG_MIN
-        dl = dl[dl <= max_d]
-        while dl.shape[0] < n_long:
-            extra = torch.rand(max(10, int(n_long*4)), device=dev_local) * (max_d - LONG_MIN) + LONG_MIN
-            dl = torch.cat([dl, extra[extra <= max_d]])
-        d = torch.cat([d, dl[:n_long]])
-    return d[torch.randperm(n, device=dev_local)]
+    return d[:n][torch.randperm(n, device=dev_local)]
 
 def gen_mixed(n, dev_local):
     """蒸馏数据场景: 全速全转角."""
-    min_d, max_d = 0.3, 6.0
+    min_d, max_d = 0.05, 6.5
     v = torch.rand(n, device=dev_local)*V_MAX
     delta = (torch.rand(n, device=dev_local)*2 - 1)*DELTA_MAX
     sp = torch.stack([torch.full((n,), CAR_X, device=dev_local), torch.full((n,), CAR_Y, device=dev_local),

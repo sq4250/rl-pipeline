@@ -19,7 +19,10 @@ N_RANDOM = 200   # 随机场景数 (种子 1000+, 与管线内建评估的 0-99 
 def load_model(path):
     ck = torch.load(path, map_location=P.DEV, weights_only=False)
     if 'model_state_dict' in ck:
-        m = P.GPSmall().to(P.DEV); m.load_state_dict(ck['model_state_dict'])
+        arch = ck.get('arch', 'gpsmall')
+        cls = {'gpsmall': P.GPSmall, 'gpmed': P.GPMedium}.get(arch)
+        if cls is None: raise ValueError(f'未知学生架构: {arch}')
+        m = cls().to(P.DEV); m.load_state_dict(ck['model_state_dict'])
         return m, True   # 蒸馏模型
     if 'actor_state_dict' in ck:
         m = P.GatedConcatActor().to(P.DEV); m.load_state_dict(ck['actor_state_dict'])
