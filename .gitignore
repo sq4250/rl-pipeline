@@ -1,0 +1,15 @@
+# ---- 训练/推理产物 (二进制) ----
+runs/
+video_assets/
+
+# ---- 任何二进制或素材 ----
+*.pt
+*.gif
+*.mp4
+*.png
+*.log
+*.csv
+
+# ---- Python ----
+__pycache__/
+*.pyc
