@@ -140,10 +140,15 @@ def render_compare(tag, s0, tgts, models, out_png):
         c = '#ff4444' if k == 0 else ('#44ff44' if k == len(tgts)-1 else '#ffaa00')
         ax_t.plot(g[0], g[1], marker='x', color=c, ms=12, mew=2.5)
         ax_t.text(g[0]+0.1, g[1]+0.1, f'g{k+1}', color=c, fontsize=8, weight='bold')
-    ax_t.set_xlim(0, P.FLD); ax_t.set_ylim(0, P.FLD); ax_t.set_aspect('equal')
+    # 视窗自适应: 部分标准场景的目标在场外 (7×7 之外), 钉死 0..FLD 会裁掉轨迹
+    allp = np.concatenate([t[:, :2] for _, t, _, _ in models] + [np.asarray(tgts, dtype=float)])
+    lo, hi = allp.min(axis=0) - 0.6, allp.max(axis=0) + 0.6
+    ax_t.add_patch(plt.Rectangle((0, 0), P.FLD, P.FLD, fc='none', ec='#555555', ls=':', lw=0.9))
+    ax_t.set_xlim(lo[0], hi[0]); ax_t.set_ylim(lo[1], hi[1])
+    ax_t.set_aspect('equal', adjustable='datalim')   # 等比例但填满面板 (不裁轨迹)
     ax_t.set_facecolor(PAGE); ax_t.grid(alpha=0.15)
     ax_t.legend(fontsize=8, labelcolor='white', facecolor='#1a1a1a', edgecolor='#444')
-    ax_t.set_title(f'{tag}', color='white')
+    ax_t.set_title(f'{tag}   [dotted box = 7x7 field]', color='white')
     ax_t.tick_params(colors='#666666', labelsize=7)
     ax_v.set_xlim(0, mx+0.3); ax_v.set_ylim(0, P.V_MAX+0.3)
     ax_v.axhline(P.V_MAX, color='#666', ls='--', lw=0.6)
@@ -158,11 +163,17 @@ ROUTE = np.array([[0, 0], [1.715, 0.815], [3.445, 1.43], [4.565, 0.095],
                   [2.965, -0.075], [3.70, -1.48], [1.91, -1.09], [0, 0]])
 
 
-def render_gif(tag, traj, out_gif):
+def render_gif(tag, traj, out_gif, route=None):
     fig, ax = plt.subplots(figsize=(7.5, 7.5), facecolor=PAGE)
-    ax.set_facecolor(PAGE); ax.set_xlim(-2.5, 5.2); ax.set_ylim(-2.2, 2.2); ax.set_aspect('equal')
-    ax.plot(ROUTE[:, 0], ROUTE[:, 1], '--', color='#c98500', lw=1.0, alpha=0.6)
-    ax.scatter(ROUTE[:, 0], ROUTE[:, 1], marker='x', s=70, c='#c98500', zorder=5)
+    ax.set_facecolor(PAGE); ax.set_aspect('equal')
+    ref = [traj[:, :2]]
+    if route is not None:
+        ax.plot(route[:, 0], route[:, 1], '--', color='#c98500', lw=1.0, alpha=0.6)
+        ax.scatter(route[:, 0], route[:, 1], marker='x', s=70, c='#c98500', zorder=5)
+        ref.append(np.asarray(route, dtype=float))
+    allp = np.concatenate(ref)
+    lo, hi = allp.min(axis=0) - 0.8, allp.max(axis=0) + 0.8
+    ax.set_xlim(lo[0], hi[0]); ax.set_ylim(lo[1], hi[1])
     trail = LineCollection([], cmap=V_CMAP, norm=plt.Normalize(0, P.V_MAX))
     trail.set_linewidth(2.2); ax.add_collection(trail)
     ax.set_title(tag, color='white')
@@ -249,7 +260,7 @@ def main():
         s0 = np.array([0., 0., 0., 0., 0.], dtype=np.float32)
         traj, gi = run_traj(model, is_student, s0, tg)
         print(f'  {"route6":>12s}: {gi}/{len(tg)} {(len(traj)-1)*P.DT:.2f}s')
-        render_gif('6-beacon route — ' + kind, traj, 'runs/viz_eval_route6.gif')
+        render_gif('6-beacon route — ' + kind, traj, 'runs/viz_eval_route6.gif', route=ROUTE)
 
     print('Done.')
 
