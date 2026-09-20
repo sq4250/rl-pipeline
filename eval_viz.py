@@ -222,28 +222,29 @@ def main():
         except Exception as e:
             print(f'(教师加载失败, 跳过对比: {e})')
 
+    def run_and_render(tag, stem, s0, tg, route=None):
+        """跑驱动模型 → GIF (学生/教师动画) + 对比 PNG (与教师同帧)."""
+        traj, gi = run_traj(model, is_student, s0.copy(), tg)
+        print(f'  {tag}  {kind}: {gi}/{len(tg)}  {(len(traj)-1)*P.DT:.2f}s')
+        render_gif(f'{tag} — driven by {driver}', traj, f'{stem}.gif', tgts=tg, route=route)
+        runs = [(kind, traj, gi, '#44ff44')]
+        if teacher is not None:
+            t_tr, t_gi = run_traj(teacher, t_is_st, s0.copy(), tg)
+            print(f'  {tag}  teacher: {t_gi}/{len(tg)}  {(len(t_tr)-1)*P.DT:.2f}s'
+                  f'   Δt={((len(traj)-1)-(len(t_tr)-1))*P.DT:+.2f}s')
+            runs.append(('teacher', t_tr, t_gi, '#ff6666'))
+        render_compare(f'{tag} — {kind} vs teacher', tg, runs, f'{stem}.png')
+
     # ── 默认: 6 信标路线 ──
     tg = [np.array(p, dtype=np.float32) for p in ROUTE[1:]]
-    s0 = np.array([0., 0., 0., 0., 0.], dtype=np.float32)
-    traj, gi = run_traj(model, is_student, s0, tg)
-    print(f'  route6: {gi}/{len(tg)}  {(len(traj)-1)*P.DT:.2f}s')
-    render_gif(f'6-beacon route — driven by {driver}', traj,
-               f'{out_dir}/viz_eval_route6.gif', tgts=tg, route=ROUTE)
+    run_and_render('6-beacon route', f'{out_dir}/viz_eval_route6',
+                   np.array([0., 0., 0., 0., 0.], dtype=np.float32), tg, route=ROUTE)
 
     # ── 可选: N 目标随机场景 ──
     if args.n_target:
         s0, tg = scene_random(args.n_target, args.seed)
-        tag = f'{args.n_target}-target scene (seed {args.seed})'
-        traj, gi = run_traj(model, is_student, s0, tg)
-        print(f'  {tag} {kind}: {gi}/{len(tg)}  {(len(traj)-1)*P.DT:.2f}s')
-        stem = f'{out_dir}/viz_eval_{args.n_target}t_s{args.seed}'
-        render_gif(f'{tag} — driven by {driver}', traj, f'{stem}.gif', tgts=tg)
-        runs = [(kind, traj, gi, '#44ff44')]
-        if teacher is not None:
-            tt_, tgi = run_traj(teacher, t_is_st, s0.copy(), tg)
-            print(f'  {tag} teacher: {tgi}/{len(tg)}  {(len(tt_)-1)*P.DT:.2f}s')
-            runs.append(('teacher', tt_, tgi, '#ff6666'))
-        render_compare(tag, tg, runs, f'{stem}.png')
+        run_and_render(f'{args.n_target}-target scene (seed {args.seed})',
+                       f'{out_dir}/viz_eval_{args.n_target}t_s{args.seed}', s0, tg)
 
     print('Done.')
 
