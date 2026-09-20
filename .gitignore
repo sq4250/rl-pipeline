@@ -9,6 +9,7 @@ video_assets/
 *.png
 *.log
 *.csv
+viz_eval_*
 
 # ---- Python ----
 __pycache__/

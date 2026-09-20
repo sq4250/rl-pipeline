@@ -7,7 +7,8 @@
   python eval_viz.py --gif               # 额外出 6 信标路线动画
   python eval_viz.py --ckpt runs/xxx.pt  # 指定 checkpoint
   python eval_viz.py --n-random 200      # 随机场景数 (默认 100)
-输出: runs/viz_eval_*.png / .gif
+  python eval_viz.py --out-dir runs      # 输出目录 (默认当前目录)
+输出: <out-dir>/viz_eval_*.png / .gif
 """
 import os, sys, argparse
 import numpy as np
@@ -104,7 +105,7 @@ def panel(ax, title, tgts, traj, idx):
     ax.set_facecolor(PAGE)
     ax.set_xlim(0, P.FLD); ax.set_ylim(0, P.FLD); ax.set_aspect('equal')
     for k, g in enumerate(tgts):
-        c = '#ff4444' if k == 0 else ('#44ff44' if k == len(tgts)-1 else '#ffaa00')
+        c = goal_color(k, len(tgts))
         ax.plot(g[0], g[1], marker='x', color=c, ms=11, mew=2.5)
         ax.plot(g[0], g[1], 'o', mfc='none', mec=c, ms=9, mew=0.8, alpha=0.7)
     j = min(idx, len(traj)-1)
@@ -137,7 +138,7 @@ def render_compare(tag, s0, tgts, models, out_png):
         ax_v.plot(np.arange(len(traj))*P.DT, traj[:, 3], color=col, lw=1.4, label=lab)
         mx = max(mx, tt)
     for k, g in enumerate(tgts):
-        c = '#ff4444' if k == 0 else ('#44ff44' if k == len(tgts)-1 else '#ffaa00')
+        c = goal_color(k, len(tgts))
         ax_t.plot(g[0], g[1], marker='x', color=c, ms=12, mew=2.5)
         ax_t.text(g[0]+0.1, g[1]+0.1, f'g{k+1}', color=c, fontsize=8, weight='bold')
     # 视窗自适应: 部分标准场景的目标在场外 (7×7 之外), 钉死 0..FLD 会裁掉轨迹
@@ -163,19 +164,38 @@ ROUTE = np.array([[0, 0], [1.715, 0.815], [3.445, 1.43], [4.565, 0.095],
                   [2.965, -0.075], [3.70, -1.48], [1.91, -1.09], [0, 0]])
 
 
-def render_gif(tag, traj, out_gif, route=None):
+def goal_color(k, n):
+    return '#ff4444' if k == 0 else ('#44ff44' if k == n-1 else '#ffaa00')
+
+
+def render_gif(tag, traj, out_gif, tgts=None, route=None):
+    """tgts: 目标点 (渲染 X + 到达容差圈 + g{k} 标签); route: 可选导航虚线."""
     fig, ax = plt.subplots(figsize=(7.5, 7.5), facecolor=PAGE)
     ax.set_facecolor(PAGE); ax.set_aspect('equal')
     ref = [traj[:, :2]]
     if route is not None:
-        ax.plot(route[:, 0], route[:, 1], '--', color='#c98500', lw=1.0, alpha=0.6)
-        ax.scatter(route[:, 0], route[:, 1], marker='x', s=70, c='#c98500', zorder=5)
+        ax.plot(route[:, 0], route[:, 1], '--', color='#c98500', lw=1.0, alpha=0.5,
+                zorder=4, label='route')
         ref.append(np.asarray(route, dtype=float))
+    if tgts is not None:
+        n = len(tgts)
+        for k, g in enumerate(tgts):
+            c = goal_color(k, n)
+            ax.plot(g[0], g[1], marker='x', color=c, ms=13, mew=2.6, zorder=7)
+            ax.add_patch(plt.Circle((g[0], g[1]), P.TOL, fc='none', ec=c, lw=1.0,
+                                    alpha=0.85, zorder=6))
+            ax.add_patch(plt.Circle((g[0], g[1]), 0.25, fc=c, ec='none',
+                                    alpha=0.10, zorder=2))
+            ax.text(g[0]+0.14, g[1]+0.14, f'g{k+1}', color=c, fontsize=10,
+                    weight='bold', zorder=8)
+        ref.append(np.asarray(tgts, dtype=float))
     allp = np.concatenate(ref)
     lo, hi = allp.min(axis=0) - 0.8, allp.max(axis=0) + 0.8
     ax.set_xlim(lo[0], hi[0]); ax.set_ylim(lo[1], hi[1])
     trail = LineCollection([], cmap=V_CMAP, norm=plt.Normalize(0, P.V_MAX))
     trail.set_linewidth(2.2); ax.add_collection(trail)
+    cb = fig.colorbar(trail, ax=ax, fraction=0.036, pad=0.02)
+    cb.set_label('v [m/s]', color='#c3c2b7'); cb.ax.tick_params(colors='#898781', labelsize=7)
     ax.set_title(tag, color='white')
     stride = max(1, len(traj)//400)
     frames = list(range(0, len(traj), stride))
@@ -213,13 +233,18 @@ def main():
     ap.add_argument('--teacher', default=DEF_TEACHER)
     ap.add_argument('--n-random', type=int, default=100)
     ap.add_argument('--gif', action='store_true')
+    ap.add_argument('--out-dir', default='.', help='可视化输出目录 (默认当前目录)')
     args = ap.parse_args()
+    out_dir = args.out_dir if os.path.isdir(args.out_dir) else '.'
+    os.makedirs(out_dir, exist_ok=True)
 
     if not os.path.exists(args.ckpt):
         raise SystemExit(f'{args.ckpt} 不存在 — 先跑 python pipeline.py')
     model, is_student = load_any(args.ckpt)
     kind = 'student' if is_student else 'teacher'
     n_par = sum(p.numel() for p in model.parameters())
+    # 图标题里明确标出是哪个模型在跑 (学生/教师 + 文件名), 避免混淆
+    driver = f'{kind.upper()} {os.path.basename(args.ckpt)}'
     print(f'Loaded {args.ckpt}  [{kind}, {n_par} params]')
 
     # ── 批量评测 ──
@@ -250,9 +275,10 @@ def main():
             traj, gi = run_traj(m, ist, s0.copy(), tg)
             runs.append((lab, traj, gi, col))
             print(f'    {nm} {lab}: {gi}/{len(tg)} {(len(traj)-1)*P.DT:.1f}s')
-        render_compare(f'{nm} — {kind} vs teacher', s0, tg, runs, f'runs/viz_eval_{nm}.png')
+        render_compare(f'{nm} — {kind} vs teacher', s0, tg, runs, f'{out_dir}/viz_eval_{nm}.png')
         if args.gif:
-            render_gif(f'{nm} — {kind}', runs[0][1], f'runs/viz_eval_{nm}.gif')
+            render_gif(f'{nm} — driven by {driver}', runs[0][1],
+                       f'{out_dir}/viz_eval_{nm}.gif', tgts=tg)
 
     # ── 6 信标路线动画 ──
     if args.gif:
@@ -260,7 +286,8 @@ def main():
         s0 = np.array([0., 0., 0., 0., 0.], dtype=np.float32)
         traj, gi = run_traj(model, is_student, s0, tg)
         print(f'  {"route6":>12s}: {gi}/{len(tg)} {(len(traj)-1)*P.DT:.2f}s')
-        render_gif('6-beacon route — ' + kind, traj, 'runs/viz_eval_route6.gif', route=ROUTE)
+        render_gif(f'6-beacon route — driven by {driver}', traj,
+                   f'{out_dir}/viz_eval_route6.gif', tgts=tg, route=ROUTE)
 
     print('Done.')
 
