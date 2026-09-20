@@ -1,14 +1,13 @@
-"""评测 + 可视化: 加载学生模型, 跑标准/随机场景, 出轨迹图与动画.
+"""轨迹可视化 + 快速测试: 默认跑 6 信标路线, 可选生成 N 目标随机场景.
 
 只依赖 pipeline.py (自动识别教师 GatedConcatActor / 学生 GP-Medium·GP-Small).
 
 用法:
-  python eval_viz.py                     # 默认 runs/kamm533_student.pt
-  python eval_viz.py --gif               # 额外出 6 信标路线动画
-  python eval_viz.py --ckpt runs/xxx.pt  # 指定 checkpoint
-  python eval_viz.py --n-random 200      # 随机场景数 (默认 100)
-  python eval_viz.py --out-dir runs      # 输出目录 (默认当前目录)
-输出: <out-dir>/viz_eval_*.png / .gif
+  python eval_viz.py                          # 默认: 6 信标路线 (7 航点含回家)
+  python eval_viz.py --n-target 5 --seed 7    # 额外: 5 目标随机场景, 种子 7
+  python eval_viz.py --ckpt runs/xxx.pt       # 指定模型 (默认 runs/kamm533_student.pt)
+输出: <out-dir>/viz_eval_route6.gif
+      <out-dir>/viz_eval_{N}t_s{seed}.gif + .png   (给了 --n-target 时)
 """
 import os, sys, argparse
 import numpy as np
@@ -25,6 +24,11 @@ import pipeline as P
 DEF_CKPT = 'runs/kamm533_student.pt'
 DEF_TEACHER = 'runs/kamm533_teacher.pt'
 PAGE = '#0d0d0d'
+V_CMAP = plt.get_cmap('turbo')
+
+# 当年 6 信标坐标 (m) + 回家点
+ROUTE = np.array([[0, 0], [1.715, 0.815], [3.445, 1.43], [4.565, 0.095],
+                  [2.965, -0.075], [3.70, -1.48], [1.91, -1.09], [0, 0]])
 
 
 # ═══════════════════ 模型加载 (按 arch 字段自动重建结构) ═══════════════════
@@ -68,124 +72,53 @@ def run_traj(model, is_student, s0, tgts, max_steps=600):
     return np.array(traj), gi
 
 
-# ═══════════════════ 场景 ═══════════════════
-def scenes_standard():
-    C, Y = P.CAR_X, P.CAR_Y
-    base = [
-        ('tight-180', np.array([0., 0., np.pi/4, 0., 0.], dtype=np.float32),
-         [np.array([C+1.5, Y+1.5]), np.array([C+0.5, Y+3.0]), np.array([C-1.0, Y+1.5])]),
-        ('tight-TR', np.array([0., 0., 0., 0., 0.], dtype=np.float32),
-         [np.array([C+2.0, Y+0.0]), np.array([C+2.5, Y+2.5]), np.array([C+0.5, Y+2.0])]),
-        ('anti-steer', np.array([C, Y, 0., 2.0, 0.], dtype=np.float32),
-         [np.array([C-1.0, Y+1.5]), np.array([C+1.0, Y+4.0]), np.array([C+3.0, Y+2.0])]),
-        ('straight', np.array([C, Y, 0., 0., 0.], dtype=np.float32),
-         [np.array([C+2.0, Y+0.1]), np.array([C+4.0, Y-0.1]), np.array([C+6.0, Y+0.0])]),
-    ]
-    return base
+# ═══════════════════ 随机场景 (与训练同分布: 增量 polar 链) ═══════════════════
+def scene_random(n_target, seed):
+    """N 段腿增量 polar 链, 分布对齐 pipeline.gen_scenes_polar.
 
-
-def scenes_random(n, seed=1000):
-    out = []
-    for i in range(n):
-        rng = np.random.RandomState(seed + i)
-        s0 = np.array([rng.uniform(P.M, P.FLD-P.M), rng.uniform(P.M, P.FLD-P.M),
-                       rng.uniform(-np.pi, np.pi), rng.uniform(0.5, P.V_MAX),
-                       rng.uniform(-P.DELTA_MAX, P.DELTA_MAX)], dtype=np.float32)
-        tg = [np.array([rng.uniform(P.M, P.FLD-P.M), rng.uniform(P.M, P.FLD-P.M)], dtype=np.float32)
-              for _ in range(3)]
-        out.append((f'rand-{i}', s0, tg))
-    return out
+    角度: 侧前/侧后/正后 = 40/40/20 (σ=π/4, 正后 ×0.6)
+    距离: 半正态 σ=1.5 截断 [0.05, 6.5]
+    初始: 车在场中心朝 +x, v~U[0,V_MAX], δ~U[-δmax, δmax]
+    """
+    rng = np.random.RandomState(seed)
+    s0 = np.array([P.CAR_X, P.CAR_Y, 0.0, rng.uniform(0.5, P.V_MAX),
+                   rng.uniform(-P.DELTA_MAX, P.DELTA_MAX)], dtype=np.float32)
+    hdg = 0.0
+    pos = np.array([P.CAR_X, P.CAR_Y])
+    tg = []
+    for _ in range(n_target):
+        r = rng.rand()
+        if r < 0.4:    dth = rng.normal(np.pi/2, np.pi/4)
+        elif r < 0.8:  dth = rng.normal(-np.pi/2, np.pi/4)
+        else:          dth = rng.normal(np.pi, np.pi/4*0.6)
+        hdg += dth
+        d = np.clip(abs(rng.normal(0.0, 1.5)), 0.05, 6.5)
+        pos = pos + d*np.array([np.cos(hdg), np.sin(hdg)])
+        pos = np.clip(pos, P.M, P.FLD - P.M)
+        tg.append(pos.astype(np.float32).copy())
+    return s0, tg
 
 
 # ═══════════════════ 渲染 ═══════════════════
-V_CMAP = plt.get_cmap('turbo')
-
-
-def panel(ax, title, tgts, traj, idx):
-    ax.set_facecolor(PAGE)
-    ax.set_xlim(0, P.FLD); ax.set_ylim(0, P.FLD); ax.set_aspect('equal')
-    for k, g in enumerate(tgts):
-        c = goal_color(k, len(tgts))
-        ax.plot(g[0], g[1], marker='x', color=c, ms=11, mew=2.5)
-        ax.plot(g[0], g[1], 'o', mfc='none', mec=c, ms=9, mew=0.8, alpha=0.7)
-    j = min(idx, len(traj)-1)
-    seg = traj[:j+1, :2]
-    if len(seg) > 1:
-        pts = seg.reshape(-1, 1, 2); pairs = np.concatenate([pts[:-1], pts[1:]], axis=1)
-        lc = LineCollection(pairs, cmap=V_CMAP, norm=plt.Normalize(0, P.V_MAX))
-        lc.set_array(traj[:j, 3]); lc.set_linewidth(2.0); lc.set_alpha(0.9)
-        ax.add_collection(lc)
-    x, y, th, dlt = traj[j, 0], traj[j, 1], traj[j, 2], traj[j, 4]
-    bx, by = 0.15*np.cos(th), 0.15*np.sin(th)
-    ax.plot([x-bx, x+bx], [y-by, y+by], color='#ffcc00', lw=2.0)
-    fx, fy, wth = x+bx, y+by, th+dlt
-    wx, wy = 0.075*np.cos(wth), 0.075*np.sin(wth)
-    ax.plot([fx-wx, fx+wx], [fy-wy, fy+wy], color='#ff4444', lw=2.4)
-    ax.set_title(title, color='white', fontsize=10)
-    ax.tick_params(colors='#666666', labelsize=7)
-
-
-def render_compare(tag, s0, tgts, models, out_png):
-    """models: [(label, traj, gi, color)]"""
-    fig, (ax_t, ax_v) = plt.subplots(1, 2, figsize=(15, 5.4), facecolor=PAGE,
-                                     gridspec_kw={'width_ratios': [1.3, 0.7]})
-    ax_v.set_facecolor(PAGE)
-    mx = 0.0
-    for lab, traj, gi, col in models:
-        tt = (len(traj)-1)*P.DT
-        ax_t.plot(traj[:, 0], traj[:, 1], color=col, lw=1.8, alpha=0.8,
-                  label=f'{lab} ({gi}/{len(tgts)}, {tt:.1f}s)')
-        ax_v.plot(np.arange(len(traj))*P.DT, traj[:, 3], color=col, lw=1.4, label=lab)
-        mx = max(mx, tt)
-    for k, g in enumerate(tgts):
-        c = goal_color(k, len(tgts))
-        ax_t.plot(g[0], g[1], marker='x', color=c, ms=12, mew=2.5)
-        ax_t.text(g[0]+0.1, g[1]+0.1, f'g{k+1}', color=c, fontsize=8, weight='bold')
-    # 视窗自适应: 部分标准场景的目标在场外 (7×7 之外), 钉死 0..FLD 会裁掉轨迹
-    allp = np.concatenate([t[:, :2] for _, t, _, _ in models] + [np.asarray(tgts, dtype=float)])
-    lo, hi = allp.min(axis=0) - 0.6, allp.max(axis=0) + 0.6
-    ax_t.add_patch(plt.Rectangle((0, 0), P.FLD, P.FLD, fc='none', ec='#555555', ls=':', lw=0.9))
-    ax_t.set_xlim(lo[0], hi[0]); ax_t.set_ylim(lo[1], hi[1])
-    ax_t.set_aspect('equal', adjustable='datalim')   # 等比例但填满面板 (不裁轨迹)
-    ax_t.set_facecolor(PAGE); ax_t.grid(alpha=0.15)
-    ax_t.legend(fontsize=8, labelcolor='white', facecolor='#1a1a1a', edgecolor='#444')
-    ax_t.set_title(f'{tag}   [dotted box = 7x7 field]', color='white')
-    ax_t.tick_params(colors='#666666', labelsize=7)
-    ax_v.set_xlim(0, mx+0.3); ax_v.set_ylim(0, P.V_MAX+0.3)
-    ax_v.axhline(P.V_MAX, color='#666', ls='--', lw=0.6)
-    ax_v.set_xlabel('t [s]', color='#aaa'); ax_v.set_title('speed [m/s]', color='white')
-    ax_v.legend(fontsize=8, labelcolor='white', facecolor='#1a1a1a', edgecolor='#444')
-    ax_v.grid(alpha=0.15); ax_v.tick_params(colors='#666666', labelsize=7)
-    fig.tight_layout(); fig.savefig(out_png, dpi=130, facecolor=PAGE); plt.close(fig)
-    print(f'  -> {out_png}')
-
-
-ROUTE = np.array([[0, 0], [1.715, 0.815], [3.445, 1.43], [4.565, 0.095],
-                  [2.965, -0.075], [3.70, -1.48], [1.91, -1.09], [0, 0]])
-
-
 def goal_color(k, n):
     return '#ff4444' if k == 0 else ('#44ff44' if k == n-1 else '#ffaa00')
 
 
 def render_gif(tag, traj, out_gif, tgts=None, route=None):
-    """tgts: 目标点 (渲染 X + 到达容差圈 + g{k} 标签); route: 可选导航虚线."""
+    """tgts: 目标点 (X + 到达容差圈 + 光晕 + g{k} 标签); route: 可选导航虚线."""
     fig, ax = plt.subplots(figsize=(7.5, 7.5), facecolor=PAGE)
     ax.set_facecolor(PAGE); ax.set_aspect('equal')
     ref = [traj[:, :2]]
     if route is not None:
-        ax.plot(route[:, 0], route[:, 1], '--', color='#c98500', lw=1.0, alpha=0.5,
-                zorder=4, label='route')
+        ax.plot(route[:, 0], route[:, 1], '--', color='#c98500', lw=1.0, alpha=0.5, zorder=4)
         ref.append(np.asarray(route, dtype=float))
     if tgts is not None:
-        n = len(tgts)
         for k, g in enumerate(tgts):
-            c = goal_color(k, n)
+            c = goal_color(k, len(tgts))
             ax.plot(g[0], g[1], marker='x', color=c, ms=13, mew=2.6, zorder=7)
             ax.add_patch(plt.Circle((g[0], g[1]), P.TOL, fc='none', ec=c, lw=1.0,
                                     alpha=0.85, zorder=6))
-            ax.add_patch(plt.Circle((g[0], g[1]), 0.25, fc=c, ec='none',
-                                    alpha=0.10, zorder=2))
+            ax.add_patch(plt.Circle((g[0], g[1]), 0.25, fc=c, ec='none', alpha=0.10, zorder=2))
             ax.text(g[0]+0.14, g[1]+0.14, f'g{k+1}', color=c, fontsize=10,
                     weight='bold', zorder=8)
         ref.append(np.asarray(tgts, dtype=float))
@@ -214,10 +147,10 @@ def render_gif(tag, traj, out_gif, tgts=None, route=None):
             trail.set_segments([])
         x, y, th, dlt = traj[j, 0], traj[j, 1], traj[j, 2], traj[j, 4]
         bx, by = 0.15*np.cos(th), 0.15*np.sin(th)
-        l1, = ax.plot([x-bx, x+bx], [y-by, y+by], color='#ffcc00', lw=2.2)
+        l1, = ax.plot([x-bx, x+bx], [y-by, y+by], color='#ffcc00', lw=2.2, zorder=9)
         fx, fy, wth = x+bx, y+by, th+dlt
         wx, wy = 0.075*np.cos(wth), 0.075*np.sin(wth)
-        l2, = ax.plot([fx-wx, fx+wx], [fy-wy, fy+wy], color='#ff4444', lw=2.6)
+        l2, = ax.plot([fx-wx, fx+wx], [fy-wy, fy+wy], color='#ff4444', lw=2.6, zorder=9)
         objs.extend([l1, l2])
 
     ani = FuncAnimation(fig, update, frames=len(frames), interval=50, blit=False)
@@ -226,14 +159,48 @@ def render_gif(tag, traj, out_gif, tgts=None, route=None):
     print(f'  -> {out_gif}')
 
 
+def render_compare(tag, tgts, runs, out_png):
+    """runs: [(label, traj, gi, color)] — 轨迹 (自适应视窗) + 速度曲线."""
+    fig, (ax_t, ax_v) = plt.subplots(1, 2, figsize=(15, 5.4), facecolor=PAGE,
+                                     gridspec_kw={'width_ratios': [1.3, 0.7]})
+    ax_v.set_facecolor(PAGE); mx = 0.0
+    for lab, traj, gi, col in runs:
+        tt = (len(traj)-1)*P.DT
+        ax_t.plot(traj[:, 0], traj[:, 1], color=col, lw=1.8, alpha=0.8,
+                  label=f'{lab} ({gi}/{len(tgts)}, {tt:.1f}s)')
+        ax_v.plot(np.arange(len(traj))*P.DT, traj[:, 3], color=col, lw=1.4, label=lab)
+        mx = max(mx, tt)
+    for k, g in enumerate(tgts):
+        c = goal_color(k, len(tgts))
+        ax_t.plot(g[0], g[1], marker='x', color=c, ms=12, mew=2.5)
+        ax_t.text(g[0]+0.1, g[1]+0.1, f'g{k+1}', color=c, fontsize=8, weight='bold')
+    allp = np.concatenate([t[:, :2] for _, t, _, _ in runs] + [np.asarray(tgts, dtype=float)])
+    lo, hi = allp.min(axis=0) - 0.6, allp.max(axis=0) + 0.6
+    ax_t.add_patch(plt.Rectangle((0, 0), P.FLD, P.FLD, fc='none', ec='#555555', ls=':', lw=0.9))
+    ax_t.set_xlim(lo[0], hi[0]); ax_t.set_ylim(lo[1], hi[1])
+    ax_t.set_aspect('equal', adjustable='datalim')
+    ax_t.set_facecolor(PAGE); ax_t.grid(alpha=0.15)
+    ax_t.legend(fontsize=8, labelcolor='white', facecolor='#1a1a1a', edgecolor='#444')
+    ax_t.set_title(f'{tag}   [dotted box = 7x7 field]', color='white')
+    ax_t.tick_params(colors='#666666', labelsize=7)
+    ax_v.set_xlim(0, mx+0.3); ax_v.set_ylim(0, P.V_MAX+0.3)
+    ax_v.axhline(P.V_MAX, color='#666', ls='--', lw=0.6)
+    ax_v.set_xlabel('t [s]', color='#aaa'); ax_v.set_title('speed [m/s]', color='white')
+    ax_v.legend(fontsize=8, labelcolor='white', facecolor='#1a1a1a', edgecolor='#444')
+    ax_v.grid(alpha=0.15); ax_v.tick_params(colors='#666666', labelsize=7)
+    fig.tight_layout(); fig.savefig(out_png, dpi=130, facecolor=PAGE); plt.close(fig)
+    print(f'  -> {out_png}')
+
+
 # ═══════════════════ main ═══════════════════
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--ckpt', default=DEF_CKPT)
-    ap.add_argument('--teacher', default=DEF_TEACHER)
-    ap.add_argument('--n-random', type=int, default=100)
-    ap.add_argument('--gif', action='store_true')
-    ap.add_argument('--out-dir', default='.', help='可视化输出目录 (默认当前目录)')
+    ap.add_argument('--ckpt', default=DEF_CKPT, help='驱动模型 (默认学生)')
+    ap.add_argument('--teacher', default=DEF_TEACHER, help='对比参照; 不存在则跳过')
+    ap.add_argument('--n-target', type=int, default=None,
+                    help='额外跑一个 N 目标随机场景 (不给则只跑 6 信标路线)')
+    ap.add_argument('--seed', type=int, default=0, help='随机场景种子 (配合 --n-target)')
+    ap.add_argument('--out-dir', default='.', help='输出目录 (默认当前目录)')
     args = ap.parse_args()
     out_dir = args.out_dir if os.path.isdir(args.out_dir) else '.'
     os.makedirs(out_dir, exist_ok=True)
@@ -243,51 +210,40 @@ def main():
     model, is_student = load_any(args.ckpt)
     kind = 'student' if is_student else 'teacher'
     n_par = sum(p.numel() for p in model.parameters())
-    # 图标题里明确标出是哪个模型在跑 (学生/教师 + 文件名), 避免混淆
     driver = f'{kind.upper()} {os.path.basename(args.ckpt)}'
     print(f'Loaded {args.ckpt}  [{kind}, {n_par} params]')
 
-    # ── 批量评测 ──
-    std = scenes_standard()
-    for nm, s0, tg in std:
-        succ, times = P.eval_batch(model, is_student, [(s0, tg)]*6)
-        print(f'  {nm:>12s}: {int(succ.sum())}/6  {times[succ].mean():.2f}s')
-    rnd = scenes_random(args.n_random)
-    succ, times = P.eval_batch(model, is_student, [(s0, tg) for _, s0, tg in rnd])
-    print(f'  {"random":>12s}: {int(succ.sum())}/{args.n_random}  '
-          f'mean={times[succ].mean():.2f}s  p90={np.quantile(times[succ], .9):.2f}s')
-
-    # ── 可视化: 学生 vs 教师 (若教师存在) ──
-    models = [(kind, model, is_student, '#44ff44')]
-    if os.path.exists(args.teacher) and args.teacher != args.ckpt:
+    teacher = None; t_is_st = None
+    if os.path.abspath(args.teacher) != os.path.abspath(args.ckpt) and os.path.exists(args.teacher):
         try:
-            teach, ts = load_any(args.teacher)
-            if ts == is_student:
-                print(f'(跳过教师对比: 同为 {"学生" if ts else "教师"} 类型)')
-            else:
-                models.append(('teacher', teach, ts, '#ff6666'))
+            teacher, t_is_st = load_any(args.teacher)
+            if t_is_st == is_student:
+                print('(跳过教师对比: 与驱动模型同类)'); teacher = None
         except Exception as e:
             print(f'(教师加载失败, 跳过对比: {e})')
 
-    for nm, s0, tg in std:
-        runs = []
-        for lab, m, ist, col in models:
-            traj, gi = run_traj(m, ist, s0.copy(), tg)
-            runs.append((lab, traj, gi, col))
-            print(f'    {nm} {lab}: {gi}/{len(tg)} {(len(traj)-1)*P.DT:.1f}s')
-        render_compare(f'{nm} — {kind} vs teacher', s0, tg, runs, f'{out_dir}/viz_eval_{nm}.png')
-        if args.gif:
-            render_gif(f'{nm} — driven by {driver}', runs[0][1],
-                       f'{out_dir}/viz_eval_{nm}.gif', tgts=tg)
+    # ── 默认: 6 信标路线 ──
+    tg = [np.array(p, dtype=np.float32) for p in ROUTE[1:]]
+    s0 = np.array([0., 0., 0., 0., 0.], dtype=np.float32)
+    traj, gi = run_traj(model, is_student, s0, tg)
+    print(f'  route6: {gi}/{len(tg)}  {(len(traj)-1)*P.DT:.2f}s')
+    render_gif(f'6-beacon route — driven by {driver}', traj,
+               f'{out_dir}/viz_eval_route6.gif', tgts=tg, route=ROUTE)
 
-    # ── 6 信标路线动画 ──
-    if args.gif:
-        tg = [np.array(p, dtype=np.float32) for p in ROUTE[1:]]
-        s0 = np.array([0., 0., 0., 0., 0.], dtype=np.float32)
+    # ── 可选: N 目标随机场景 ──
+    if args.n_target:
+        s0, tg = scene_random(args.n_target, args.seed)
+        tag = f'{args.n_target}-target scene (seed {args.seed})'
         traj, gi = run_traj(model, is_student, s0, tg)
-        print(f'  {"route6":>12s}: {gi}/{len(tg)} {(len(traj)-1)*P.DT:.2f}s')
-        render_gif(f'6-beacon route — driven by {driver}', traj,
-                   f'{out_dir}/viz_eval_route6.gif', tgts=tg, route=ROUTE)
+        print(f'  {tag} {kind}: {gi}/{len(tg)}  {(len(traj)-1)*P.DT:.2f}s')
+        stem = f'{out_dir}/viz_eval_{args.n_target}t_s{args.seed}'
+        render_gif(f'{tag} — driven by {driver}', traj, f'{stem}.gif', tgts=tg)
+        runs = [(kind, traj, gi, '#44ff44')]
+        if teacher is not None:
+            tt_, tgi = run_traj(teacher, t_is_st, s0.copy(), tg)
+            print(f'  {tag} teacher: {tgi}/{len(tg)}  {(len(tt_)-1)*P.DT:.2f}s')
+            runs.append(('teacher', tt_, tgi, '#ff6666'))
+        render_compare(tag, tg, runs, f'{stem}.png')
 
     print('Done.')
 
