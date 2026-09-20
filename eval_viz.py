@@ -2,12 +2,15 @@
 
 只依赖 pipeline.py (自动识别教师 GatedConcatActor / 学生 GP-Medium·GP-Small).
 
-用法:
-  python eval_viz.py                          # 默认: 6 信标路线 (7 航点含回家)
-  python eval_viz.py --n-target 5 --seed 7    # 额外: 5 目标随机场景, 种子 7
-  python eval_viz.py --ckpt runs/xxx.pt       # 指定模型 (默认 runs/kamm533_student.pt)
-输出: <out-dir>/viz_eval_route6.gif
-      <out-dir>/viz_eval_{N}t_s{seed}.gif + .png   (给了 --n-target 时)
+用法 (默认跑 6 信标路线; --n-target 额外加一个 N 目标随机场景):
+  python eval_viz.py                       # GIF (单车)
+  python eval_viz.py --png                 # GIF + PNG
+  python eval_viz.py --compare             # GIF 里两辆车同时跑 (学生 + 教师)
+  python eval_viz.py --compare --png       # 两者都叠加对比
+  python eval_viz.py --ckpt runs/xxx.pt    # 换驱动模型 (默认 runs/kamm533_student.pt)
+  python eval_viz.py --n-target 5 --seed 7 # 额外 N 目标随机场景 (种子可复现)
+输出: <out-dir>/viz_eval_route6.gif (+ .png 若 --png)
+      <out-dir>/viz_eval_{N}t_s{seed}.gif (+ .png)
 """
 import os, sys, argparse
 import numpy as np
@@ -104,13 +107,18 @@ def goal_color(k, n):
     return '#ff4444' if k == 0 else ('#44ff44' if k == n-1 else '#ffaa00')
 
 
-def render_gif(tag, traj, out_gif, tgts=None, route=None):
-    """tgts: 目标点 (X + 到达容差圈 + 光晕 + g{k} 标签); route: 可选导航虚线."""
+def render_gif(tag, runs, out_gif, tgts=None, route=None):
+    """动画: runs = [(label, traj, color)] — 单模型按速度着色, 多模型各车一色同跑.
+
+    tgts: 目标点 (X + 到达容差圈 + 光晕 + g{k} 标签); route: 可选导航虚线.
+    """
+    single = len(runs) == 1
     fig, ax = plt.subplots(figsize=(7.5, 7.5), facecolor=PAGE)
     ax.set_facecolor(PAGE); ax.set_aspect('equal')
-    ref = [traj[:, :2]]
+    ref = [t[:, :2] for _, t, _ in runs]
     if route is not None:
-        ax.plot(route[:, 0], route[:, 1], '--', color='#c98500', lw=1.0, alpha=0.5, zorder=4)
+        ax.plot(route[:, 0], route[:, 1], '--', color='#c98500', lw=1.0, alpha=0.5,
+                zorder=4, label='route')
         ref.append(np.asarray(route, dtype=float))
     if tgts is not None:
         for k, g in enumerate(tgts):
@@ -125,33 +133,48 @@ def render_gif(tag, traj, out_gif, tgts=None, route=None):
     allp = np.concatenate(ref)
     lo, hi = allp.min(axis=0) - 0.8, allp.max(axis=0) + 0.8
     ax.set_xlim(lo[0], hi[0]); ax.set_ylim(lo[1], hi[1])
-    trail = LineCollection([], cmap=V_CMAP, norm=plt.Normalize(0, P.V_MAX))
-    trail.set_linewidth(2.2); ax.add_collection(trail)
-    cb = fig.colorbar(trail, ax=ax, fraction=0.036, pad=0.02)
-    cb.set_label('v [m/s]', color='#c3c2b7'); cb.ax.tick_params(colors='#898781', labelsize=7)
+    # 轨迹: 单模型按速度着色 (带色条); 多模型各车一色 (带图例)
+    trails = []
+    for lab, traj, col in runs:
+        if single:
+            lc = LineCollection([], cmap=V_CMAP, norm=plt.Normalize(0, P.V_MAX))
+            lc.set_linewidth(2.2)
+        else:
+            lc = LineCollection([], colors=col, lw=2.0, alpha=0.85, label=lab)
+        ax.add_collection(lc); trails.append(lc)
+    if single:
+        cb = fig.colorbar(trails[0], ax=ax, fraction=0.036, pad=0.02)
+        cb.set_label('v [m/s]', color='#c3c2b7'); cb.ax.tick_params(colors='#898781', labelsize=7)
+    else:
+        ax.legend(fontsize=10, labelcolor='white', facecolor='#1a1a1a', edgecolor='#444',
+                  loc='upper left')
     ax.set_title(tag, color='white')
-    stride = max(1, len(traj)//400)
-    frames = list(range(0, len(traj), stride))
-    if len(traj)-1 not in frames: frames.append(len(traj)-1)
+    n_max = max(len(t) for _, t, _ in runs)
+    stride = max(1, n_max//400)
+    frames = list(range(0, n_max, stride))
+    if n_max-1 not in frames: frames.append(n_max-1)
     objs = []
 
     def update(i):
-        j = frames[i]
         for o in objs: o.remove()
         objs.clear()
-        seg = traj[:j+1, :2]
-        if len(seg) > 1:
-            pts = seg.reshape(-1, 1, 2); pairs = np.concatenate([pts[:-1], pts[1:]], axis=1)
-            trail.set_segments(pairs); trail.set_array(traj[:j, 3])
-        else:
-            trail.set_segments([])
-        x, y, th, dlt = traj[j, 0], traj[j, 1], traj[j, 2], traj[j, 4]
-        bx, by = 0.15*np.cos(th), 0.15*np.sin(th)
-        l1, = ax.plot([x-bx, x+bx], [y-by, y+by], color='#ffcc00', lw=2.2, zorder=9)
-        fx, fy, wth = x+bx, y+by, th+dlt
-        wx, wy = 0.075*np.cos(wth), 0.075*np.sin(wth)
-        l2, = ax.plot([fx-wx, fx+wx], [fy-wy, fy+wy], color='#ff4444', lw=2.6, zorder=9)
-        objs.extend([l1, l2])
+        for (lab, traj, col), trail in zip(runs, trails):
+            j = min(frames[i], len(traj)-1)          # 先跑完的车停在终点
+            seg = traj[:j+1, :2]
+            if len(seg) > 1:
+                pts = seg.reshape(-1, 1, 2)
+                trail.set_segments(np.concatenate([pts[:-1], pts[1:]], axis=1))
+                if single: trail.set_array(traj[:j, 3])
+            else:
+                trail.set_segments([])
+            x, y, th, dlt = traj[j, 0], traj[j, 1], traj[j, 2], traj[j, 4]
+            bx, by = 0.15*np.cos(th), 0.15*np.sin(th)
+            body = col if not single else '#ffcc00'
+            l1, = ax.plot([x-bx, x+bx], [y-by, y+by], color=body, lw=2.2, zorder=9)
+            fx, fy, wth = x+bx, y+by, th+dlt
+            wx, wy = 0.075*np.cos(wth), 0.075*np.sin(wth)
+            l2, = ax.plot([fx-wx, fx+wx], [fy-wy, fy+wy], color='#ff4444', lw=2.6, zorder=9)
+            objs.extend([l1, l2])
 
     ani = FuncAnimation(fig, update, frames=len(frames), interval=50, blit=False)
     ani.save(out_gif, writer=PillowWriter(fps=20))
@@ -197,6 +220,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--ckpt', default=DEF_CKPT, help='驱动模型 (默认学生)')
     ap.add_argument('--teacher', default=DEF_TEACHER, help='对比参照; 不存在则跳过')
+    ap.add_argument('--compare', action='store_true',
+                    help='叠加对比: GIF 同时跑两辆车 (驱动模型 + 教师), PNG 也随之变对比图')
+    ap.add_argument('--png', action='store_true', help='额外输出 PNG (轨迹 + 速度曲线)')
     ap.add_argument('--n-target', type=int, default=None,
                     help='额外跑一个 N 目标随机场景 (不给则只跑 6 信标路线)')
     ap.add_argument('--seed', type=int, default=0, help='随机场景种子 (配合 --n-target)')
@@ -214,26 +240,37 @@ def main():
     print(f'Loaded {args.ckpt}  [{kind}, {n_par} params]')
 
     teacher = None; t_is_st = None
-    if os.path.abspath(args.teacher) != os.path.abspath(args.ckpt) and os.path.exists(args.teacher):
+    if args.compare:
+        if os.path.abspath(args.teacher) == os.path.abspath(args.ckpt):
+            raise SystemExit('--compare 需要 --teacher 指向另一个模型')
+        if not os.path.exists(args.teacher):
+            raise SystemExit(f'--compare 需要教师 checkpoint: {args.teacher} 不存在')
         try:
             teacher, t_is_st = load_any(args.teacher)
-            if t_is_st == is_student:
-                print('(跳过教师对比: 与驱动模型同类)'); teacher = None
         except Exception as e:
-            print(f'(教师加载失败, 跳过对比: {e})')
+            raise SystemExit(f'教师加载失败: {e}')
+        if t_is_st == is_student:
+            raise SystemExit('--compare 的两个模型须一为学生一为教师')
+        print(f'Compare with {args.teacher}  [{"student" if t_is_st else "teacher"}]')
 
     def run_and_render(tag, stem, s0, tg, route=None):
-        """跑驱动模型 → GIF (学生/教师动画) + 对比 PNG (与教师同帧)."""
+        """跑驱动模型 (--compare 时并跑教师) → GIF; --png 时另出 PNG."""
         traj, gi = run_traj(model, is_student, s0.copy(), tg)
-        print(f'  {tag}  {kind}: {gi}/{len(tg)}  {(len(traj)-1)*P.DT:.2f}s')
-        render_gif(f'{tag} — driven by {driver}', traj, f'{stem}.gif', tgts=tg, route=route)
-        runs = [(kind, traj, gi, '#44ff44')]
+        t_dur = (len(traj)-1)*P.DT
+        print(f'  {tag}  {kind}: {gi}/{len(tg)}  {t_dur:.2f}s')
+        gif_runs = [(f'{kind} {os.path.basename(args.ckpt)}', traj, '#44ff44')]
+        png_runs = [(kind, traj, gi, '#44ff44')]
+        ttl = f'{tag} — driven by {driver}'
         if teacher is not None:
             t_tr, t_gi = run_traj(teacher, t_is_st, s0.copy(), tg)
-            print(f'  {tag}  teacher: {t_gi}/{len(tg)}  {(len(t_tr)-1)*P.DT:.2f}s'
-                  f'   Δt={((len(traj)-1)-(len(t_tr)-1))*P.DT:+.2f}s')
-            runs.append(('teacher', t_tr, t_gi, '#ff6666'))
-        render_compare(f'{tag} — {kind} vs teacher', tg, runs, f'{stem}.png')
+            tt_dur = (len(t_tr)-1)*P.DT
+            print(f'  {tag}  teacher: {t_gi}/{len(tg)}  {tt_dur:.2f}s   Δt={t_dur-tt_dur:+.2f}s')
+            gif_runs.append((f'teacher {os.path.basename(args.teacher)}', t_tr, '#ff6666'))
+            png_runs.append(('teacher', t_tr, t_gi, '#ff6666'))
+            ttl = f'{tag} — {kind} vs teacher'
+        render_gif(ttl, gif_runs, f'{stem}.gif', tgts=tg, route=route)
+        if args.png:
+            render_compare(ttl, tg, png_runs, f'{stem}.png')
 
     # ── 默认: 6 信标路线 ──
     tg = [np.array(p, dtype=np.float32) for p in ROUTE[1:]]
