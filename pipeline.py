@@ -5,12 +5,16 @@
 Phase A: 基础到达能力 (TOL 课程 → transition → polar 探索 → anneal)
 Phase B: SelWP 融合 (frozen base 仅 rollout + 100% SelWP + 速度门 → blank 网络)
 Phase C: 续训 (噪声破死锁 → random straight-line → 最终 anneal, 无 SelWP)
-Phase D: 蒸馏 (BC 距离加权 + DAgger×12 速度选优 → GP-Small 3.7K)
+Phase D: 蒸馏 (BC 距离加权 + DAgger×12 两级选优 → GP-Medium 9K)
+
+场景分布: 三段腿增量 polar 链, 每腿距离 半正态 σ=1.5 截断 [0.05, 6.5]
+(近端由半正态自然覆盖反打触发区, 远端由 full_state 全速起步 + 轨迹扫距覆盖;
+ 实测无需任何均匀补带 — 见 v4 消融). 角度: 侧前40% / 侧后40% / 正后20%.
 
 用法:
-  python pipeline.py            # 完整流程 (A→B→C→D)
-  python pipeline.py --from c   # 从 Phase C 续跑 (需 runs/p2_bc.pt)
-  python pipeline.py --from d   # 从 Phase D 续跑 (需 runs/kamm533_teacher.pt)
+  python pipeline.py            # 完整流程 (A→B→C→D), 产出 runs/kamm533_student.pt
+  python pipeline.py --from d   # 只重跑蒸馏 (需 runs/kamm533_teacher.pt)
+  python pipeline.py --student gpsmall   # 3.7K 小模型变体
 """
 import os, argparse
 import numpy as np
@@ -229,11 +233,8 @@ def _polar_angles(n, n_side, n_behind, angle_sigma, dev_local):
 #   近端 [0.05,0.5) 由半正态自然平坦覆盖 (~26%) — 无需 close 带 (v3 教训: 洞在截断下限, 不在形状)
 #   远端由 full_state 全速起步 + 轨迹扫距自然覆盖 — 无需 long 带 (v1 证据: 纯半正态教师远端不退化)
 
-def _polar_dists(n, min_d, max_d, dist_sigma, dev_local, long_frac=0.0, close_frac=0.0):
-    """半正态截断采样距离, 保证返回恰 n 个 (候选不足时循环补足).
-
-    long_frac/close_frac 保留为 0 (兼容旧签名); v4 起不使用均匀带.
-    """
+def _polar_dists(n, min_d, max_d, dist_sigma, dev_local):
+    """半正态截断采样距离, 保证返回恰 n 个 (候选不足时循环补足)."""
     d = torch.abs(torch.randn(max(10, int(n*4)), device=dev_local) * dist_sigma)
     d = d[(d >= min_d) & (d <= max_d)]
     while d.shape[0] < n:
@@ -292,8 +293,8 @@ def _ga_mixed(n, dev_local):
     th = torch.atan2(torch.sin(th), torch.cos(th))
     return th[torch.randperm(n, device=dev_local)]
 
-def _gd_mixed(n, min_d, max_d, dev_local, long_frac=0.0, close_frac=0.0):
-    """蒸馏场景距离 — 半正态 σ=2.0 截断, 与训练分布同源 (v4: 无均匀带)."""
+def _gd_mixed(n, min_d, max_d, dev_local):
+    """蒸馏场景距离 — 半正态 σ=2.0 截断, 与训练分布同源."""
     d = torch.abs(torch.randn(max(10, int(n*4)), device=dev_local)*2.0)
     d = d[(d >= min_d) & (d <= max_d)]
     while d.shape[0] < n:
@@ -935,12 +936,25 @@ def phase_c(actor, critic):
     probe_countersteer(actor, False)
     return actor, critic
 
-def phase_d(teacher):
-    """蒸馏: BC 距离加权 + DAgger×12 速度选优."""
+def phase_d(teacher, arch='gpmed'):
+    """蒸馏: BC 距离加权 + DAgger×12 两级选优.
+
+    arch: 'gpmed' (GP-Medium 9K, 默认部署) / 'gpsmall' (GP-Small 3.7K 变体)
+    checkpoint 带 arch 字段, eval_ckpt.load_model 据此重建正确结构.
+    """
+    student_cls = {'gpmed': GPMedium, 'gpsmall': GPSmall}[arch]
+    tag = 'kamm533_student' if arch == 'gpmed' else 'kamm533_student_small'
+    ck_bc, ck_best = f'runs/{tag}_bc.pt', f'runs/{tag}.pt'
+
     teacher.eval(); set_teacher_deterministic(teacher)
-    student = GPSmall().to(DEV)
+    student = student_cls().to(DEV)
     n_params = sum(p.numel() for p in student.parameters())
-    print(f'\n=== Phase D: distill → GP-Small ({n_params} params) ===')
+    print(f'\n=== Phase D: distill → {student_cls.__name__} ({n_params} params) ===')
+
+    def save(path, t=None):
+        d = {'model_state_dict': student.state_dict(), 'arch': arch}
+        if t is not None: d['time'] = t
+        torch.save(d, path)
 
     print('\n--- D1: BC (200 ep, distance-weighted) ---')
     X_pol, V2, V3, Y = collect_bc(teacher, noise_std=0.03)
@@ -948,11 +962,11 @@ def phase_d(teacher):
     train_epochs(student, X_pol, V2, V3, Y, 200, 2e-3)
     t_bc, st_bc, sr_bc = calc_mean_time(student)
     print(f'  BC mean time: {t_bc:.2f}s  tight={st_bc:.2f}  rand={sr_bc:.2f}')
-    torch.save({'model_state_dict': student.state_dict()}, 'runs/gp_small_kamm533_bc.pt')
+    save(ck_bc)
     # BC 作为初始最优落盘: 若 DAgger 无一轮超越, 最终加载仍有效 (不再 FileNotFoundError)
     # 两级选优: 先比随机场景成功率 (防速度选优牺牲泛化), 再比 tight 场景速度
     best_time, best_rand, best_round = t_bc, sr_bc, 0
-    torch.save({'model_state_dict': student.state_dict(), 'time': t_bc}, 'runs/gp_small_kamm533.pt')
+    save(ck_best, t_bc)
 
     print('\n--- D2: DAgger ×12 (speed-selected, random-gated) ---')
     for dagger_it in range(1, 13):
@@ -965,16 +979,16 @@ def phase_d(teacher):
         print(f'  D{dagger_it} mean time: {t:.2f}s  tight={st:.2f}  rand={sr:.2f}')
         if sr > best_rand or (sr == best_rand and t < best_time):
             best_time, best_rand, best_round = t, sr, dagger_it
-            torch.save({'model_state_dict': student.state_dict(), 'time': t}, 'runs/gp_small_kamm533.pt')
+            save(ck_best, t)
             print(f'  -> Best! Saved (D{dagger_it})')
-        torch.save({'model_state_dict': student.state_dict(), 'time': t}, f'runs/gp_small_kamm533_d{dagger_it}.pt')
+        save(f'runs/{tag}_d{dagger_it}.pt', t)
 
     best_src = f'D{best_round}' if best_round > 0 else 'BC'
-    print(f'\nBest: {best_src} with {best_time:.2f}s (rand={best_rand:.2f}) -> runs/gp_small_kamm533.pt')
-    print('\n=== Final eval: GP-Small vs Teacher ===')
-    student.load_state_dict(torch.load('runs/gp_small_kamm533.pt', map_location=DEV, weights_only=False)['model_state_dict'])
+    print(f'\nBest: {best_src} with {best_time:.2f}s (rand={best_rand:.2f}) -> {ck_best}')
+    print(f'\n=== Final eval: {student_cls.__name__} vs Teacher ===')
+    student.load_state_dict(torch.load(ck_best, map_location=DEV, weights_only=False)['model_state_dict'])
     student.eval()
-    print('--- GP-Small (部署) ---')
+    print(f'--- {student_cls.__name__} ({n_params} params, 部署) ---')
     eval_model(student, True)
     probe_countersteer(student, True)
     print('--- Teacher ---')
@@ -984,6 +998,8 @@ def phase_d(teacher):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--from', dest='stage', default='a', choices=['a', 'b', 'c', 'd'], help='起始阶段')
+    ap.add_argument('--student', default='gpmed', choices=['gpmed', 'gpsmall'],
+                    help='Phase D 学生架构 (默认 gpmed 9K; gpsmall 3.7K)')
     args = ap.parse_args()
 
     print('='*60)
@@ -1016,7 +1032,7 @@ def main():
             print('Loaded runs/kamm533_teacher.pt')
         else:
             teacher = actor
-        phase_d(teacher)
+        phase_d(teacher, arch=args.student)
 
     print('\nPipeline done.')
 
