@@ -219,7 +219,7 @@ def render_compare(tag, tgts, runs, out_png):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--ckpt', default=DEF_CKPT, help='驱动模型 (默认学生)')
-    ap.add_argument('--teacher', default=DEF_TEACHER, help='对比参照; 不存在则跳过')
+    ap.add_argument('--teacher', default=DEF_TEACHER, help='对比模型 (仅 --compare 时使用)')
     ap.add_argument('--compare', action='store_true',
                     help='叠加对比: GIF 同时跑两辆车 (驱动模型 + 教师), PNG 也随之变对比图')
     ap.add_argument('--png', action='store_true', help='额外输出 PNG (轨迹 + 速度曲线)')

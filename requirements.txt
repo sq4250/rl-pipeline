@@ -1,10 +1,11 @@
-# Kamm 5/3/3 自包含管线依赖
-# 环境: Python 3.10+ (已验证 3.14), NVIDIA GPU + CUDA
+# rl-pipeline 依赖
+# 环境: Python 3.10+, NVIDIA GPU + CUDA
+#
+# torch 需按 https://pytorch.org 安装对应 CUDA 版本。
 
-# 训练 + 推理核心
-torch>=2.4          # PyTorch (含 CUDA 构建, 按 https://pytorch.org 安装对应版本)
-numpy>=1.26         # 数值计算
+torch>=2.4
+numpy>=1.26
 
-# 可视化 (viz.py)
-matplotlib>=3.8     # 绘图 + GIF 动画
-pillow>=10.0        # PillowWriter GIF 输出
+# 可视化 (eval_viz.py 出 PNG/GIF)
+matplotlib>=3.8
+pillow>=10.0
