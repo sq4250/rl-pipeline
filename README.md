@@ -32,5 +32,5 @@ python export_mcu.py          # 导出 C 权重
 ## 说明
 
 - 场景采样: 三段腿增量 polar 链,每腿距离半正态 σ=1.5 截断 [0.05, 6.5];角度 侧前40%/侧后40%/正后20%。
-- 蒸馏学生用 ReLU(MCU 无 GELU),导出 C 时归一化折叠进第一层权重。
-- `export_mcu.py` 默认写到 `C:/Users/tsian/Desktop/beta_ackerman/project/code/core`;该目录不存在时回退到当前目录。
+- 蒸馏学生用 ReLU(MCU 无 GELU),导出 C 时归一化折叠进第一层权重 —— C 侧直接吃原始物理量。
+- `export_mcu.py` 默认把 `.c/.h` 写到当前目录;要直接写进固件工程用 `--out-dir`,或设环境变量 `MCU_CORE_DIR`。

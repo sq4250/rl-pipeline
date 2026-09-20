@@ -10,8 +10,9 @@ arch 字段自动识别. 生成 nn_model_<arch>_v4.c/.h:
   - 末尾打印 model_desc_t 符号名, 供 model_factory / config.h 注册
 
 用法:
-  python export_mcu.py                                  # 默认 runs/kamm533_student.pt
-  python export_mcu.py --ckpt runs/xxx.pt --out-dir .   # 指定输入/输出目录
+  python export_mcu.py                       # 读 runs/kamm533_student.pt, C 文件落当前目录
+  python export_mcu.py --out-dir <固件core/>  # 直接写进固件工程
+  MCU_CORE_DIR=<固件core/> python export_mcu.py   # 或用环境变量固定
 """
 import argparse, os, sys
 import numpy as np
@@ -20,8 +21,8 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pipeline as P
 
-# 固件工程 core/ 目录 (存在则默认写入; 否则用 --out-dir)
-MCU = 'C:/Users/tsian/Desktop/beta_ackerman/project/code/core'
+# 输出目录: 默认当前目录; 直接写进固件 core/ 可设环境变量 MCU_CORE_DIR
+DEFAULT_OUT = os.environ.get('MCU_CORE_DIR', '.')
 
 # arch → (dims, ckpt 默认值)
 ARCHS = {
@@ -216,15 +217,15 @@ def main():
     ap.add_argument('--arch', default=None, choices=list(ARCHS), help='默认按 ckpt arch 字段')
     ap.add_argument('--a-lat', type=float, default=P.A_LAT,
                     help='写入 model_desc 的横向约束 (默认取 pipeline.A_LAT, 必须与训练一致)')
-    ap.add_argument('--out-dir', default=MCU)
+    ap.add_argument('--out-dir', default=DEFAULT_OUT,
+                    help='C 文件输出目录 (默认当前目录; 可用环境变量 MCU_CORE_DIR 覆盖)')
     args = ap.parse_args()
 
     if not os.path.exists(args.ckpt):
         raise SystemExit(f'{args.ckpt} 不存在 — 先跑 python pipeline.py')
     out_dir = args.out_dir
     if not os.path.isdir(out_dir):
-        print(f'(输出目录不存在: {out_dir} → 改用当前目录)')
-        out_dir = '.'
+        raise SystemExit(f'输出目录不存在: {out_dir}  (用 --out-dir 指定)')
 
     ck = torch.load(args.ckpt, map_location='cpu', weights_only=False)
     arch = args.arch or ck.get('arch')
